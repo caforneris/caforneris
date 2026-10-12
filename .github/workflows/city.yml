@@ -1,0 +1,26 @@
+name: Update the city
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # every day at 09:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the contribution calendar and redraw
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 city.py --fetch
+      - name: Commit if anything changed
+        run: |
+          git config user.name "caforneris"
+          git config user.email "craig.forneris@populous.com"
+          git add days.json city-light.svg city-dark.svg
+          git diff --cached --quiet || git commit -m "Update the city"
+          git push
