@@ -1,22 +1,27 @@
 """Build the profile city: the year as a block of towers that builds itself and is then eaten.
 
-    python city.py [--freeze SECONDS]
+    python city.py [--fetch] [--freeze SECONDS]
 
-Reads days.json, a map of date to commits made that day, and writes
-city-light.svg and city-dark.svg. Each tower is one day, with a floor for every
-three commits, and is a deeper step of blue the taller it is. Weeks run left to
-right and the days of the week run front to back. The towers go up one at a
-time in the order the days happened; then a yellow ball with a mouth sweeps the
-city row by row, front row first, and eats each tower from the roof down, with
-four ghosts chasing it along the cleared ground. The result is a single SVG
-animated with CSS alone, so it plays inside a README. --freeze pauses the
-animation at a moment in the loop, for checking a still frame.
+Reads days.json, a map of date to contributions made that day, and writes
+city-light.svg and city-dark.svg. Each tower is one day and is a deeper step of
+blue the taller it is. Weeks run left to right and the days of the week run
+front to back. The towers go up one at a time in the order the days happened;
+then a yellow ball with a mouth sweeps the city row by row, front row first,
+and eats each tower from the roof down, with four ghosts chasing it along the
+cleared ground. The result is a single SVG animated with CSS alone, so it plays
+inside a README.
+
+--fetch first rewrites days.json from the GitHub contribution calendar for the
+current year. It needs GITHUB_TOKEN and reads the account from
+GITHUB_REPOSITORY_OWNER. --freeze pauses the animation at a moment in the loop,
+for checking a still frame.
 """
 import argparse
 import datetime as dt
 import json
 import math
 import os
+import urllib.request
 from xml.sax.saxutils import escape
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -29,8 +34,10 @@ THEMES = {
              "ramp": ["#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef"]},
 }
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
-W, H, PAD = 840, 384, 28
-SLOT, WIDE, FLOOR, PER_FLOOR = 17, 12, 5, 3
+WIDTH, H, PAD = 840, 384, 28
+SLOT, WIDE, FLOOR = 17, 12, 5
+FLOORS = 35  # the tallest tower has about this many floors
+NUMBERS = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
 BACK_X, BACK_Y = 8, 7      # how far each row sits behind the one in front
 DEEP_X, DEEP_Y = 6, 5      # the depth of one tower
 GROUND = 328
@@ -63,15 +70,18 @@ def size(depth):
 
 def draw(daily, starts, t, freeze):
     weeks = len(starts)
+    W = max(WIDTH, weeks * SLOT + 6 * BACK_X + DEEP_X + 2 * PAD + 24)  # a full year is wider than the page
     left = (W - weeks * SLOT - 6 * BACK_X - DEEP_X) / 2 + 4
     peak_day = max(daily, key=daily.get)
-    tallest = -(-daily[peak_day] // PER_FLOOR) * FLOOR
+    per_floor = max(1, math.ceil(daily[peak_day] / FLOORS))
+    tallest = -(-daily[peak_day] // per_floor) * FLOOR
+    every = "each one" if per_floor == 1 else f"every {NUMBERS[per_floor] if per_floor < len(NUMBERS) else per_floor}"
 
     def lot(week, depth):
         return left + week * SLOT + depth * BACK_X, GROUND - depth * BACK_Y
 
     def height(week, depth):
-        return -(-daily.get(starts[week] + dt.timedelta(days=6 - depth), 0) // PER_FLOOR) * FLOOR
+        return -(-daily.get(starts[week] + dt.timedelta(days=6 - depth), 0) // per_floor) * FLOOR
 
     def at(moment):
         return EAT_FROM + (EAT_TO - EAT_FROM) * moment / clock
@@ -166,7 +176,7 @@ def draw(daily, starts, t, freeze):
                 count = daily[peak_day]
                 css.append(f"@keyframes peak{{0%,{grown + RISE:.2f}%{{opacity:0}}{grown + RISE + 1:.2f}%,{bite - 0.3:.2f}%{{opacity:1}}"
                            f"{bite:.2f}%,100%{{opacity:0}}}}.peak{{animation-name:peak}}")
-                peak = (f'<g class="peak">{text(x + WIDE / 2 + 3, base - h - DEEP_Y - 8, f"{count} commits in a day", 11, t["ink2"], 600, "middle")}</g>')
+                peak = (f'<g class="peak">{text(x + WIDE / 2 + 3, base - h - DEEP_Y - 8, f"{count} contributions in a day", 11, t["ink2"], 600, "middle")}</g>')
     css.append("@media (prefers-reduced-motion:reduce){.b,.peak{animation:none}.pac,.ghost{display:none}}")
     if freeze is not None:
         css.append(f".b,.pac,.peak,.jl,.jr{{animation-delay:-{freeze}s}}.b,.pac,.peak,.jl,.jr,.ghost,.float{{animation-play-state:paused}}")
@@ -191,18 +201,38 @@ def draw(daily, starts, t, freeze):
               for index in reversed(range(len(GHOSTS)))]
     return "\n".join([
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
-        f'aria-label="2026 as a city that builds itself, one tower for each day and one floor for every three commits, then is eaten tower by tower">',
+        f'aria-label="2026 as a city that builds itself, one tower for each day of contributions, then is eaten tower by tower">',
         f"<style>{''.join(css)}</style>", f'<defs>{"".join(defs)}</defs>',
         f'<rect width="{W}" height="{H}" rx="12" fill="{t["surface"]}"/>',
-        text(PAD, 50, "2026, built day by day", 20, t["ink"], 600),
-        text(PAD, 70, "Each tower is one day of my commits, with a floor for every three. Then it all gets eaten, roof first.", 13, t["ink2"]),
+        text(PAD, 50, f"{peak_day.year}, built day by day", 20, t["ink"], 600),
+        text(PAD, 70, f"Each tower is one day of my contributions, with a floor for {every}. Then it all gets eaten, roof first.", 13, t["ink2"]),
         plane, *lots, *towers, peak, *labels, *ghosts, eater, "</svg>"])
+
+
+def fetch():
+    """Rewrite days.json from the contribution calendar for the year so far."""
+    today = dt.datetime.now(dt.timezone.utc)
+    query = ("query($login:String!,$from:DateTime!,$to:DateTime!){user(login:$login){contributionsCollection(from:$from,to:$to)"
+             "{contributionCalendar{weeks{contributionDays{date contributionCount}}}}}}")
+    variables = {"login": os.environ["GITHUB_REPOSITORY_OWNER"], "from": f"{today.year}-01-01T00:00:00Z", "to": today.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    request = urllib.request.Request("https://api.github.com/graphql", json.dumps({"query": query, "variables": variables}).encode(),
+                                     {"Authorization": "bearer " + os.environ["GITHUB_TOKEN"]})
+    with urllib.request.urlopen(request) as response:
+        calendar = json.load(response)["data"]["user"]["contributionsCollection"]["contributionCalendar"]
+    days = {day["date"]: day["contributionCount"] for week in calendar["weeks"] for day in week["contributionDays"]}
+    if not any(days.values()):
+        return  # nothing yet this year: keep last year's city until there is something to build
+    with open(os.path.join(ROOT, "days.json"), "w", encoding="utf-8") as handle:
+        json.dump(days, handle, indent=0)
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--fetch", action="store_true")
     parser.add_argument("--freeze", type=float)
     args = parser.parse_args()
+    if args.fetch:
+        fetch()
     with open(os.path.join(ROOT, "days.json"), encoding="utf-8") as handle:
         daily = {dt.date.fromisoformat(day): count for day, count in json.load(handle).items()}
     monday = min(daily) - dt.timedelta(days=min(daily).weekday())
